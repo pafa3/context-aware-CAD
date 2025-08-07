@@ -211,9 +211,8 @@ class SpeakerAwareDataset(Dataset):
         # Create attention mask
         attention_mask = [1] * len(tokens) + [0] * padding_length
         
-        # Get label
-        labels_info = self.data.labels_info.iloc[index]
-        label = labels_info['label'][0] if isinstance(labels_info['label'], list) else labels_info['label']
+        # Get label - it's now just an integer
+        label = self.data.labels_info.iloc[index]
         
         return {
             'input_ids': torch.tensor(input_ids, dtype=torch.long),
@@ -279,10 +278,7 @@ def load_data():
     df_validation = pd.DataFrame(dataset["validation"]) 
     df_test = pd.DataFrame(dataset["test"])
     
-    # Filter out samples with no labels
-    df_train = df_train[df_train['labels_info'].apply(lambda x: len(x['label']) > 0)]
-    df_validation = df_validation[df_validation['labels_info'].apply(lambda x: len(x['label']) > 0)]
-    df_test = df_test[df_test['labels_info'].apply(lambda x: len(x['label']) > 0)]
+    # No need to filter - the dataset class already handles this
     
     print(f"Train samples: {len(df_train)}")
     print(f"Validation samples: {len(df_validation)}")
@@ -330,8 +326,7 @@ def save_results(trainer, model, tokenizer, df_test, config):
     results_df.to_csv(f"{config['save_results_dir']}/predictions_{timestamp}.csv", index=False)
     
     # 4. Calculate and save metrics
-    true_labels = [x['label'][0] if isinstance(x['label'], list) else x['label'] 
-                   for x in df_test['labels_info']]
+    true_labels = df_test['labels_info'].tolist()
     
     # Classification report
     report = classification_report(true_labels, pred_labels, 
@@ -408,8 +403,7 @@ def main():
     
     # Calculate class weights
     print("\nCalculating class weights...")
-    all_labels = [x['label'][0] if isinstance(x['label'], list) else x['label'] 
-                  for x in df_train['labels_info']]
+    all_labels = df_train['labels_info'].tolist()
     class_weights = calculate_class_weights(all_labels)
     print(f"Class weights: {class_weights}")
     

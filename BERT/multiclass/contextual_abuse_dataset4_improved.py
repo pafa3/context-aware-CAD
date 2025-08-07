@@ -4,10 +4,10 @@ import re
 import datasets
 from transformers import AutoTokenizer
 
+# Updated to match actual labels in the data
 CATEGORY_NAMES = ['Neutral', "IdentityDirectedAbuse", "AffiliationDirectedAbuse", "PersonDirectedAbuse"]
 
 # Paths for the dataset
-DATASET_FULL_PATH = "cad_v1_1.tsv"
 DATASET_TRAIN_PATH = "train.csv"
 DATASET_DEV_PATH = "dev.csv"
 DATASET_TEST_PATH = "test.csv"
@@ -31,7 +31,7 @@ def replace_urls(text):
     return text
 
 def ignore_entry(s):
-    return pd.isna(s) or len(s.strip()) == 0 or s in ["[removed]", "[deleted]"]
+    return pd.isna(s) or len(str(s).strip()) == 0 or s in ["[removed]", "[deleted]"]
 
 class ContextualAbuseRedditDataset(datasets.GeneratorBasedBuilder):
     VERSION = datasets.Version("1.0.0")
@@ -41,36 +41,30 @@ class ContextualAbuseRedditDataset(datasets.GeneratorBasedBuilder):
         self.level = level
 
     def _info(self):
-        label_map_dict = get_label_map()[0]
         return datasets.DatasetInfo(
             description="Reddit Dataset for Contextual Abuse Detection",
             features=datasets.Features({
                 "text": datasets.Value("string"),
                 "parent_text": datasets.Value("string"),
                 "id": datasets.Value("string"),
-                "labels_info": datasets.features.Sequence({
-                    "label": datasets.ClassLabel(names=list(label_map_dict.keys()))
-                })
+                "labels_info": datasets.features.ClassLabel(names=CATEGORY_NAMES)
             }),
             supervised_keys=("text", "labels_info")
         )
 
     def extract_level_1(self, row):
         # Level 1: Current comment only, no context
-        # Just the current speaker's text
         text = f"Speaker1: {row['meta_text']}"
         return text, ""
 
     def extract_level_2(self, row):
         # Level 2: Current comment with its immediate parent
-        # Format: current text, parent as context
         text = f"Speaker1: {row['meta_text']}"
         parent_text = f"Speaker2: {row.get('parent_text_level_0', '')}" if row.get('parent_text_level_0', '') else ""
         return text, parent_text
 
     def extract_level_3(self, row):
         # Level 3: Current comment with all preceding comments
-        # We'll concatenate all context into parent_text with proper speaker labels
         text = f"Speaker1: {row['meta_text']}"
         
         # Build conversation history from oldest to newest
@@ -78,9 +72,8 @@ class ContextualAbuseRedditDataset(datasets.GeneratorBasedBuilder):
         for i in range(14, -1, -1):  # Start from oldest (level_14) to newest (level_0)
             parent_text_key = f'parent_text_level_{i}'
             parent_text = row.get(parent_text_key, '')
-            if parent_text:
+            if parent_text and not pd.isna(parent_text) and str(parent_text).strip():
                 # Alternate speaker labels based on depth
-                # Even levels = Speaker2, Odd levels = Speaker1 (to show alternating conversation)
                 speaker_num = 2 + (i % 2)
                 conversation_parts.append(f"Speaker{speaker_num}: {parent_text}")
         
@@ -105,53 +98,47 @@ class ContextualAbuseRedditDataset(datasets.GeneratorBasedBuilder):
         ]
 
     def _generate_examples(self, filepath):
-        df = pd.read_csv(filepath, sep=',')
-        df = df.fillna('')
-
-        id_to_data = {}
-        for id_, row in df.iterrows():
-            info_id = row['info_id']
-
-            # Process text based on the level
-            if self.level == 1:
-                text, parent_text = self.extract_level_1(row)
-            elif self.level == 2:
-                text, parent_text = self.extract_level_2(row)
-            else:
-                text, parent_text = self.extract_level_3(row)
-
-            # Apply preprocessing to both text and parent_text
-            text = replace_subreddits_usernames(text).replace('[linebreak]', "\n").replace("\n ", "\n").strip()
-            text = replace_urls(text)
-            parent_text = replace_subreddits_usernames(parent_text).replace('[linebreak]', "\n").replace("\n ", "\n").strip()
-            parent_text = replace_urls(parent_text)
-
-            # Skip entries that should be ignored
-            if ignore_entry(row['meta_text']):
-                continue
-
-            if info_id not in id_to_data:
-                id_to_data[info_id] = {
-                    'text': text,
-                    'parent_text': parent_text,
-                    'labels': set(),
-                }
-
-            # Handle labels
-            labels = []
-            if pd.isna(row['annotation_Primary']) or row['annotation_Primary'] in ['Slur', 'CounterSpeech']:
-                labels.append('Neutral')
-            else:
-                labels.append(row['annotation_Primary'])
-
-            id_to_data[info_id]['labels'].update(labels)
-
         label_map = get_label_map()[0]
-        for info_id, data in id_to_data.items():
-            labels_info = [{'label': label_map[label]} for label in data['labels']]
-            yield info_id, {
-                'text': data['text'],
-                'parent_text': data['parent_text'],
-                'id': info_id,
-                'labels_info': labels_info,
-            }
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            
+            for idx, row in enumerate(reader):
+                # Skip entries that should be ignored
+                if ignore_entry(row.get('meta_text', '')):
+                    continue
+                
+                # Get the info_id as unique identifier
+                info_id = row.get('info_id', f'unknown_{idx}')
+                
+                # Process text based on the level
+                if self.level == 1:
+                    text, parent_text = self.extract_level_1(row)
+                elif self.level == 2:
+                    text, parent_text = self.extract_level_2(row)
+                else:
+                    text, parent_text = self.extract_level_3(row)
+                
+                # Apply preprocessing
+                text = replace_subreddits_usernames(text).replace('[linebreak]', "\n").strip()
+                text = replace_urls(text)
+                parent_text = replace_subreddits_usernames(parent_text).replace('[linebreak]', "\n").strip()
+                parent_text = replace_urls(parent_text)
+                
+                # Handle labels - map to our categories
+                annotation = row.get('annotation_Primary', 'Neutral')
+                
+                # Map Slur and CounterSpeech to Neutral as in original code
+                if annotation in ['Slur', 'CounterSpeech', '']:
+                    annotation = 'Neutral'
+                
+                # Only yield if we have a valid label
+                if annotation in CATEGORY_NAMES:
+                    label_id = label_map[annotation]
+                    
+                    yield info_id, {
+                        'text': text,
+                        'parent_text': parent_text,
+                        'id': info_id,
+                        'labels_info': label_id,
+                    }
